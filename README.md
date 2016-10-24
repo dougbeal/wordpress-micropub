@@ -23,6 +23,8 @@ sideloaded from URLs.
 
 ### WordPress details
 
+#### Filters and hooks
+
 Adds one filter: `before_micropub( $input )`
 
 Called before handling a Micropub request. Returns $input, possibly modified.
@@ -42,6 +44,8 @@ Arguments:
 `$wp_args`: optional associative array. For creates and updates, this is the
   arguments passed to wp_insert_post or wp_update_post. For deletes and
   undeletes, args['ID'] contains the post id to be (un)deleted. Null for queries.
+
+#### Other
 
 Stores [microformats2](http://microformats.org/wiki/microformats2) properties in
 [post metadata](http://codex.wordpress.org/Function_Reference/post_meta_Function_Examples)
@@ -113,3 +117,42 @@ To set up PHPCodesniffer to test changes for adherance to WordPress Coding Stand
 1. Run in command line or install a plugin for your favorite editor.
 1. To list coding standard issues in a file, run phpcs --standard=phpcs.ruleset.xml micropub.php
 1. If you want to try to automatically fix issues, run phpcbf with the same arguments as phpcs.
+
+
+### Changelog
+
+#### 1.0
+Substantial update. Supports
+[full W3C Micropub spec](https://www.w3.org/TR/micropub/), except for optional
+media endpoint.
+
+* Post content will not be automatically marked up if theme supports
+  microformats2 or
+  [Post Kinds plugin](https://wordpress.org/plugins/indieweb-post-kinds/) is
+  enabled.
+* Add PHP Codesniffer File
+
+#### 0.4
+* Store all properties in post meta except those in a blacklist
+* Support setting authentication and token endpoint in wp-config
+  (set MICROPUB_AUTHENTICATION_ENDPOINT and MICROPUB_TOKEN_ENDPOINT)
+* Support setting all micropub posts to draft in wp-config for testing by
+  setting MICROPUB_DRAFT_MODE in wp-config.
+* Support using local auth to authenticate as opposed to Indieauth
+  as by setting MICROPUB_LOCAL_AUTH in wp-config
+* Set content to summary if no content provided
+* Support querying for syndicate-to and future query options.
+
+#### 0.3
+* Use the specific WordPress user whose URL matches the access token, if
+  possible.
+* Set `post_date_gmt` as well as `post_date`.
+
+#### 0.2
+* Support more Micropub properties: photo, like-of, repost-of, in-reply-to,
+  rsvp, location, category, h=event
+* Check but don't require access tokens on localhost.
+* Better error handling.
+
+#### 0.1
+Initial release.

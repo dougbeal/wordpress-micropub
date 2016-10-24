@@ -30,6 +30,8 @@ sideloaded from URLs.
 
 == WordPress details ==
 
+=== Filters and hooks ===
+
 Adds one filter: `before_micropub( $input )`
 
 Called before handling a Micropub request. Returns $input, possibly modified.
@@ -47,8 +49,10 @@ Arguments:
   format.
 
 `$wp_args`: optional associative array. For creates and updates, this is the
-  arguments passed to wp_insert_post or wp_update_post. For deletes and
+8  arguments passed to wp_insert_post or wp_update_post. For deletes and
   undeletes, args['ID'] contains the post id to be (un)deleted. Null for queries.
+
+=== Other ===
 
 Stores [microformats2](http://microformats.org/wiki/microformats2) properties in
 [post metadata](http://codex.wordpress.org/Function_Reference/post_meta_Function_Examples)
@@ -103,7 +107,51 @@ None yet.
 
 == Screenshots ==
 
-TODO
+None.
+
+== Development ==
+
+The canonical repo is http://github.com/snarfed/wordpress-micropub . Feedback
+and pull requests are welcome!
+
+To add a new release to the WordPress plugin directory, run `push.sh`.
+
+To set up your local environment to run the unit tests:
+
+1. Install [PHPUnit](https://github.com/sebastianbergmann/phpunit#installation),
+   e.g. `brew install homebrew/php/wp-cli phpunit` with Homebrew on Mac OS X.
+1. Install and start MySQL. (You may already have it.)
+1. Run `./bin/install-wp-tests.sh wordpress_micropub_test root '' localhost` to
+   download WordPress and
+   [its unit test library](https://develop.svn.wordpress.org/trunk/tests/phpunit/),
+   into `/tmp` and `./temp` by default, and create a MySQL db to test against.
+   [Background here](http://wp-cli.org/docs/plugin-unit-tests/). Feel free to
+   use a MySQL user other than `root`. You can set the `WP_CORE_DIR` and
+   `WP_TESTS_DIR` environment variables to change where WordPress and its test
+   library are installed. For example, I put them both in the repo dir.
+1. Open `wordpress-tests-lib/wp-tests-config.php` and add a slash to the end of
+   the ABSPATH value. No clue why it leaves off the slash; it doesn't work
+   without it.
+1. Run `phpunit` in the repo root dir. If you set `WP_CORE_DIR` and
+   `WP_TESTS_DIR` above, you'll need to set them for this too. You should see
+   output like this:
+
+    ```
+    Installing...
+    ...
+    1 / 1 (100%)
+    Time: 703 ms, Memory: 33.75Mb
+    OK (1 test, 3 assertions)
+    ```
+
+To set up PHPCodesniffer to test changes for adherance to WordPress Coding Standards
+
+1. install [PHPCS](https://github.com/squizlabs/PHP_CodeSniffer).
+1. install and connect [WordPress-Coding-Standards](https://github.com/WordPress-Coding-Standards/WordPress-Coding-Standards)
+1. Run in command line or install a plugin for your favorite editor.
+1. To list coding standard issues in a file, run phpcs --standard=phpcs.ruleset.xml micropub.php
+1. If you want to try to automatically fix issues, run phpcbf with the same arguments as phpcs.
+
 
 == Changelog ==
 
@@ -142,8 +190,3 @@ media endpoint.
 
 = 0.1 =
 Initial release.
-
-== Development ==
-
-The canonical repo is http://github.com/snarfed/wordpress-micropub . Feedback
-and pull requests are welcome!
