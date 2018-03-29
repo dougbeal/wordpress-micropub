@@ -1,0 +1,55 @@
+# CircleCI automatically reads this file from our repo and uses it for
+# configuration. Docs:
+# https://circleci.com/docs/2.0/configuration-reference/
+# https://circleci.com/docs/2.0/sample-config/
+version: 2
+
+jobs:
+  build:
+    docker:
+      # https://hub.docker.com/r/circleci/
+      - image: circleci/php:5  # phpunit requires php <= 6.0.0
+      - image: circleci/mysql:latest
+
+    environment:
+      - WP_CORE_DIR: /tmp/wordpress
+      - WP_TESTS_DIR: /tmp/wordpress-tests-lib
+#      - PATH: /tmp/.composer/vendor/bin:$PATH
+
+    steps:
+      - checkout
+
+      - restore_cache:
+          key: venv-{{ .Branch }}-{{ checksum "composer.lock" }}
+
+      - run:
+          name: Dependencies
+          command: |
+            composer install
+            sudo pear install phpunit
+            sudo apt-get install mysql-client subversion  # needed by intsall-wp-tests.sh
+
+      - run:
+          name: WordPress test environment
+          command: |
+            ./bin/install-wp-tests.sh micropub_test root ''
+            sed -i.bak "s/wordpress' );$/wordpress\/' );/" /tmp/wordpress-tests-lib/wp-tests-config.php
+
+      - run:
+          name: Tests
+          command: |
+            ./vendor/bin/phpcs --config-set ignore_warnings_on_exit 1 --standard=phpcs.xml
+            mkdir -p ~/phpunit
+            phpunit --log-junit ~/phpunit/junit.xml --coverage-html $CIRCLE_ARTIFACTS
+
+      - save_cache:
+          key: venv-{{ .Branch }}-{{ checksum "composer.lock" }}
+          paths:
+            - /tmp/wordpress
+            - /tmp/wordpress-tests-lib
+
+      - store_artifacts:
+          path: ~/phpunit
+
+      - store_test_results:
+          path: ~/phpunit
