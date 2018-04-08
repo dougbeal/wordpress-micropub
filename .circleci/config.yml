@@ -4,6 +4,17 @@
 # https://circleci.com/docs/2.0/sample-config/
 version: 2
 
+# STATE:
+# phpunit currently exits with no output
+# xml config seems bad? no...bootstrap seems bad?
+# https://stackoverflow.com/a/49562992/186123
+# tests/bootstrap.php seems bad
+# ./vendor/bin/phpunit --bootstrap tests/bootstrap.php MicropubTest tests/test_micropub.php
+#   empty output
+#
+# http://otaku-elite.com/code/2012/02/27/phpunit-fails-silently-returning-code-255/
+# https://circleci.com/gh/snarfed/wordpress-micropub/235
+
 jobs:
   build:
     docker:
@@ -26,7 +37,7 @@ jobs:
           name: Dependencies
           command: |
             composer install
-            sudo pear install phpunit
+            # sudo pear install phpunit
             sudo apt-get install mysql-client subversion  # needed by intsall-wp-tests.sh
 
       - run:
@@ -40,13 +51,14 @@ jobs:
           command: |
             ./vendor/bin/phpcs --config-set ignore_warnings_on_exit 1 --standard=phpcs.xml
             mkdir -p ~/phpunit
-            phpunit --log-junit ~/phpunit/junit.xml --coverage-html $CIRCLE_ARTIFACTS
+            ./vendor/bin/phpunit --log-junit ~/phpunit/junit.xml --coverage-html ~/phpunit/
 
       - save_cache:
           key: venv-{{ .Branch }}-{{ checksum "composer.lock" }}
           paths:
             - /tmp/wordpress
             - /tmp/wordpress-tests-lib
+            - ./vendor
 
       - store_artifacts:
           path: ~/phpunit
