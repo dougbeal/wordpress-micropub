@@ -36,7 +36,8 @@ if ( ! defined( 'MICROPUB_NAMESPACE' ) ) {
 	define( 'MICROPUB_NAMESPACE', 'micropub/1.0' );
 }
 
-register_activation_hook( __FILE__, array( 'Micropub_Admin', 'activate' ) );
+// Global Functions
+require_once plugin_dir_path( __FILE__ ) . 'includes/functions.php';
 
 // Admin Menu Functions
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-admin.php';

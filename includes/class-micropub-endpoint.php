@@ -12,6 +12,9 @@ class Micropub_Endpoint {
 	// associative array, read from JSON or form-encoded input. populated by load_input().
 	protected static $input;
 
+	// file array populated by load_input
+	protected static $files;
+
 	// associative array, populated by authorize().
 	protected static $micropub_auth_response;
 
@@ -24,19 +27,37 @@ class Micropub_Endpoint {
 	public static function init() {
 		$cls = get_called_class();
 
-		// register endpoint
-		// (I originally used add_rewrite_endpoint() to serve on /micropub instead
-		// of ?micropub=endpoint, but that had problems. details in
-		// https://github.com/snarfed/wordpress-micropub/commit/d3bdc433ee019d3968be6c195b0384cba5ffe36b#commitcomment-9690066 )
-		add_filter( 'query_vars', array( $cls, 'query_var' ) );
-		add_action( 'parse_query', array( $cls, 'parse_query' ) );
-
 		// endpoint discovery
 		add_action( 'wp_head', array( $cls, 'micropub_html_header' ), 99 );
 		add_action( 'send_headers', array( $cls, 'micropub_http_header' ) );
 		add_filter( 'host_meta', array( $cls, 'micropub_jrd_links' ) );
 		add_filter( 'webfinger_user_data', array( $cls, 'micropub_jrd_links' ) );
 
+		// register endpoint
+		add_action( 'rest_api_init', array( $cls, 'register_route' ) );
+
+		add_filter( 'rest_request_after_callbacks', array( $cls, 'return_micropub_error' ), 10, 3 );
+	}
+
+	public static function return_micropub_error( $response, $handler, $request ) {
+		if ( '/micropub/1.0/endpoint' !== $request->get_route() ) {
+				return $response;
+		}
+		if ( is_wp_error( $response ) ) {
+			return micropub_wp_error( $response );
+		}
+		return $response;
+	}
+
+	public static function log_error( $message, $name = 'Micropub' ) {
+		if ( empty( $message ) ) {
+			return false;
+		}
+		if ( is_array( $message ) || is_object( $message ) ) {
+			$message = wp_json_encode( $message );
+		}
+
+		return error_log( sprintf( '%1$s: %2$s', $name, $message ) ); // phpcs:ignore
 	}
 
 	public static function get( $array, $key, $default = array() ) {
@@ -46,154 +67,224 @@ class Micropub_Endpoint {
 		return $default;
 	}
 
-	/**
-	 * Adds some query vars
-	 *
-	 * @param array $vars
-	 * @return array
-	 */
-	public static function query_var( $vars ) {
-		$vars[] = 'micropub';
-		return $vars;
+	public static function register_route() {
+		$cls = get_called_class();
+		register_rest_route(
+			MICROPUB_NAMESPACE, '/endpoint', array(
+				array(
+					'methods'             => WP_REST_Server::CREATABLE,
+					'callback'            => array( $cls, 'post_handler' ),
+					'permission_callback' => array( $cls, 'check_post_permissions' ),
+
+				),
+				array(
+					'methods'             => WP_REST_Server::READABLE,
+					'callback'            => array( $cls, 'query_handler' ),
+					'permission_callback' => array( $cls, 'check_query_permissions' ),
+
+				),
+			)
+		);
 	}
+
+	public static function load_auth() {
+		static::$micropub_auth_response = apply_filters( 'indieauth_response', static::$micropub_auth_response );
+		static::$scopes                 = apply_filters( 'indieauth_scopes', static::$scopes );
+	}
+
+	public static function check_query_permissions( $request ) {
+		self::load_auth();
+		$query = $request->get_param( 'q' );
+		if ( ! $query ) {
+			return new WP_Error( 'invalid_request', 'Missing Query Parameter', array( 'status' => 400 ) );
+		}
+		if ( ! current_user_can( 'read' ) ) {
+			return new WP_Error( 'forbidden', 'Unauthorized', array( 'status' => 403 ) );
+		}
+		return true;
+	}
+
+	public static function check_post_permissions( $request ) {
+		self::load_auth();
+
+		$action = $request->get_param( 'action' );
+		$action = $action ? $action : 'create';
+
+		$permission = self::check_scope( $action, get_current_user_id() );
+		if ( is_micropub_error( $permission ) ) {
+			return $permission->to_wp_error();
+		}
+		return $permission;
+	}
+
 
 	/**
 	 * Parse the micropub request and render the document
 	 *
-	 * @param WP $wp WordPress request context
+	 * @param WP_REST_Request $request WordPress request
 	 *
 	 * @uses apply_filter() Calls 'before_micropub' on the default request
 	 */
-	public static function parse_query( $wp ) {
-		if ( ! array_key_exists( 'micropub', $wp->query_vars ) ) {
-			return;
-		}
+	protected static function load_input( $request ) {
+		$content_type = $request->get_content_type();
+		$content_type = $content_type['value'];
 
-		static::load_input();
+		if ( 'GET' === $request->get_method() ) {
+			static::$input = $request->get_query_params();
+		} elseif ( 'application/json' === $content_type ) {
+			static::$input = $request->get_json_params();
+		} elseif ( ! $content_type ||
+			'application/x-www-form-urlencoded' === $content_type ||
+			'multipart/form-data' === $content_type ) {
+				static::$input = self::form_to_json( $request->get_body_params() );
+				static::$files = $request->get_file_params();
+		} else {
+			return new WP_Micropub_Error( 'invalid_request', 'Unsupported Content Type: ' . $content_type, 400 );
+		}
+		if ( empty( static::$input ) ) {
+			return new WP_Micropub_Error( 'invalid_request', 'No input provided', 400 );
+		}
 		if ( WP_DEBUG ) {
-			error_log(
-				'Micropub Data: ' . wp_json_encode( $_GET ) . ' ' .
-					wp_json_encode( static::$input )
-			);
+			static::log_error( $request->get_query_params(), 'Micropub Query Parameters' );
+			static::log_error( static::$input, 'Micropub Input' );
 		}
 		static::$input = apply_filters( 'before_micropub', static::$input );
-
-		$user_id = get_current_user_id();
-		if ( is_wp_error( $user_id ) ) {
-			static::handle_authorize_error( 401, $user_id->get_error_message() );
-		}
-
-		if ( ! $user_id ) {
-			static::handle_authorize_error( 401, 'Unauthorized' );
-		}
-
-		static::$scopes                 = apply_filters( 'indieauth_scopes', static::$scopes );
-		static::$micropub_auth_response = apply_filters( 'indieauth_response', static::$micropub_auth_response );
-
-		if ( 'GET' === $_SERVER['REQUEST_METHOD'] && isset( static::$input['q'] ) ) {
-			static::query_handler( $user_id );
-		} elseif ( 'POST' === $_SERVER['REQUEST_METHOD'] ) {
-			self::post_handler( $user_id );
-		} else {
-			static::error( 400, 'Unknown Micropub request' );
-		}
 	}
 
 	/**
-	 * Check scope
+	 * Check scope.
+	 * If a user id is supplied check the scope against the user permissions otherwise just check scopes
 	 *
 	 * @param string $scope
+	 * @param id $user_id. Optional.
 	 *
-	 * @return boolean
+	 * @return boolean|WP_Micropub_Error
 	**/
-	protected static function check_scope( $scope ) {
-		if ( in_array( 'post', static::$scopes, true ) ) {
+	protected static function check_scope( $scope, $user_id = null ) {
+		$inscope = in_array( $scope, static::$scopes, true ) || in_array( 'post', static::$scopes, true );
+		if ( ! $inscope ) {
+			return new WP_Micropub_Error( 'insufficient_scope', sprintf( 'scope insufficient to %1$s posts', $scope ), 401, static::$scopes );
+		}
+		// Because 0 is a user
+		if ( is_null( $user_id ) ) {
 			return true;
 		}
-		return in_array( $scope, static::$scopes, true );
+		switch ( $scope ) {
+			case 'update':
+				if ( ! user_can( $user_id, 'edit_posts' ) ) {
+					return new WP_Micropub_Error( 'forbidden', sprintf( 'user id %1$s cannot update posts', $user_id ), 403 );
+				}
+				return true;
+			case 'undelete':
+			case 'delete':
+				if ( ! user_can( $user_id, 'delete_posts' ) ) {
+					return new WP_Micropub_Error( 'forbidden', sprintf( 'user id %1$s cannot delete posts', $user_id ), 403 );
+				}
+				return true;
+			case 'create':
+				if ( ! user_can( $user_id, 'publish_posts' ) ) {
+					return new WP_Micropub_Error( 'forbidden', sprintf( 'user id %1$s cannot create posts', $user_id ), 403 );
+				}
+				return true;
+			default:
+				return new WP_Micropub_Error( 'invalid_request', 'Unknown Action', 400 );
+		}
 	}
 
 
 	/**
 	 * Parse the micropub request and render the document
 	 *
-	 * @param int $user_id User ID for Authorized User.
+	 * @param WP_REST_Request $request.
 	 */
-	public static function post_handler( $user_id ) {
-		$status = 200;
-		$action = self::get( static::$input, 'action', 'create' );
-		if ( ! self::check_scope( $action ) ) {
-			static::error( 403, sprintf( 'scope insufficient to %1$s posts', $action ) );
+	public static function post_handler( $request ) {
+		$user_id  = get_current_user_id();
+		$response = new WP_REST_Response();
+		$load     = static::load_input( $request );
+		if ( is_micropub_error( $load ) ) {
+			return $load;
 		}
-		$url = self::get( static::$input, 'url' );
+
+
+		$action = mp_get( static::$input, 'action', 'create' );
+		if ( ! self::check_scope( $action ) ) {
+			return new WP_Micropub_Error( 'insufficient_scope', sprintf( 'scope insufficient to %1$s posts', $action ), 403 );
+		}
+
+		$url = mp_get( static::$input, 'url' );
+
 
 		// check that we support all requested syndication targets
 		$synd_supported = self::get_syndicate_targets( $user_id );
 		$uids           = array();
 		foreach ( $synd_supported as $syn ) {
-			$uids[] = self::get( $syn, 'uid' );
+			$uids[] = mp_get( $syn, 'uid' );
 		}
-		$properties     = self::get( static::$input, 'properties' );
-		$synd_requested = self::get( $properties, 'mp-syndicate-to' );
+
+		$properties     = mp_get( static::$input, 'properties' );
+		$synd_requested = mp_get( $properties, 'mp-syndicate-to' );
 		$unknown        = array_diff( $synd_requested, $uids );
 
 		if ( $unknown ) {
-			static::error( 400, 'Unknown mp-syndicate-to targets: ' . implode( ', ', $unknown ) );
-
-		} elseif ( ! $url || 'create' === $action ) { // create
-			if ( $user_id && ! user_can( $user_id, 'publish_posts' ) ) {
-				static::error( 403, 'user id ' . $user_id . ' cannot publish posts' );
-			}
-			$args   = static::create( $user_id );
-			$status = 201;
-			static::header( 'Location', get_permalink( $args['ID'] ) );
-
-		} elseif ( 'update' === $action || ! $action ) { // update
-			if ( $user_id && ! user_can( $user_id, 'edit_posts' ) ) {
-				static::error( 403, 'user id ' . $user_id . ' cannot edit posts' );
-			}
-			$args = static::update();
-
-		} elseif ( 'delete' === $action ) { // delete
-			if ( $user_id && ! user_can( $user_id, 'delete_posts' ) ) {
-				static::error( 403, 'user id ' . $user_id . ' cannot delete posts' );
-			}
-			$args = get_post( url_to_postid( $url ), ARRAY_A );
-			if ( ! $args ) {
-				static::error( 400, $url . ' not found' );
-			}
-			static::check_error( wp_trash_post( $args['ID'] ) );
-
-		} elseif ( 'undelete' === $action ) { // undelete
-			if ( $user_id && ! user_can( $user_id, 'publish_posts' ) ) {
-				static::error( 403, 'user id ' . $user_id . ' cannot undelete posts' );
-			}
-			$found = false;
-			// url_to_postid() doesn't support posts in trash, so look for
-			// it ourselves, manually.
-			// here's another, more complicated way that customizes WP_Query:
-			// https://gist.github.com/peterwilsoncc/bb40e52cae7faa0e6efc
-			foreach ( get_posts( array( 'post_status' => 'trash' ) ) as $post ) {
-				if ( get_the_guid( $post ) === $url ) {
-					wp_untrash_post( $post->ID );
-					wp_publish_post( $post->ID );
-					$found = true;
-					$args  = array( 'ID' => $post->ID );
+			return new WP_Micropub_Error( 'invalid_request', sprintf( 'Unknown mp-syndicate-to targets: %1$s', implode( ', ', $unknown ) ), 400 );
+		}
+		// For all actions other than creation a url is required
+		if ( ! $url && 'create' !== $action ) {
+			return new WP_Micropub_Error( 'invalid_request', sprintf( 'URL is Required for %1$s action', $action ), 400 );
+		}
+		switch ( $action ) {
+			case 'create':
+				$args = static::create( $user_id );
+				if ( ! is_micropub_error( $args ) ) {
+					$response->set_status( 201 );
+					$response->header( 'Location', get_permalink( $args['ID'] ) );
 				}
-			}
-			if ( ! $found ) {
-				static::error( 400, 'deleted post ' . $url . ' not found' );
-			}
-
-			// unknown action
-		} else {
-			static::error( 400, 'unknown action ' . $action );
+				break;
+			case 'update':
+				$args = static::update( static::$input );
+				break;
+			case 'delete':
+				$args = get_post( url_to_postid( $url ), ARRAY_A );
+				if ( ! $args ) {
+					return new WP_Micropub_Error( 'invalid_request', sprintf( '%1$s not found', $url ), 400 );
+				}
+				static::check_error( wp_trash_post( $args['ID'] ) );
+				break;
+			case 'undelete':
+				$found = false;
+				// url_to_postid() doesn't support posts in trash, so look for
+				// it ourselves, manually.
+				// here's another, more complicated way that customizes WP_Query:
+				// https://gist.github.com/peterwilsoncc/bb40e52cae7faa0e6efc
+				foreach ( get_posts(
+					array(
+						'post_status' => 'trash',
+						'fields'      => 'ids',
+					)
+				) as $post_id ) {
+					if ( get_the_guid( $post_id ) === $url ) {
+						wp_untrash_post( $post_id );
+						wp_publish_post( $post_id );
+						$found = true;
+						$args  = array( 'ID' => $post_id );
+					}
+				}
+				if ( ! $found ) {
+					return new WP_Micropub_Error( 'invalid_request', sprintf( 'deleted post %1$s not found', $url ), 400 );
+				}
+				break;
+			default:
+				return new WP_Micropub_Error( 'invalid_request', sprintf( 'unknown action %1$s', $action ), 400 );
+		}
+		if ( is_micropub_error( $args ) ) {
+			return $args;
 		}
 		if ( ! empty( $synd_requested ) ) {
 			do_action( 'micropub_syndication', $args['ID'], $synd_requested );
 		}
 		do_action( 'after_micropub', static::$input, $args );
-		static::respond( $status, null, $args );
+		$response->set_data( $args );
+		return $response;
 	}
 
 	private static function get_syndicate_targets( $user_id ) {
@@ -203,9 +294,12 @@ class Micropub_Endpoint {
 	/**
 	 * Handle queries to the micropub endpoint
 	 *
-	 * @param int $user_id Authenticated User
+	 * @param WP_REST_Request $request
 	 */
-	private static function query_handler( $user_id ) {
+	public static function query_handler( $request ) {
+		$user_id = get_current_user_id();
+		static::load_input( $request );
+
 		$resp = apply_filters( 'micropub_query', null, static::$input );
 		if ( ! $resp ) {
 			switch ( static::$input['q'] ) {
@@ -233,7 +327,7 @@ class Micropub_Endpoint {
 				case 'source':
 					$post_id = url_to_postid( static::$input['url'] );
 					if ( ! $post_id ) {
-						static::error( 400, 'not found: ' . static::$input['url'] );
+						return new WP_Micropub_Error( 'invalid_request', sprintf( 'not found: %1$s', static::$input['url'] ), 400 );
 					}
 					$resp  = static::get_mf2( $post_id );
 					$props = static::$input['properties'];
@@ -249,12 +343,12 @@ class Micropub_Endpoint {
 					}
 					break;
 				default:
-					static::error( 400, 'unknown query ' . static::$input['q'] );
+					return new WP_Micropub_Error( 'invalid_request', 'unknown query', 400, static::$input );
 			}
 		}
 
 		do_action( 'after_micropub', static::$input, null );
-		static::respond( 200, $resp );
+		return new WP_REST_Response( $resp, 200 );
 	}
 
 	/*
@@ -264,7 +358,7 @@ class Micropub_Endpoint {
 		$args = static::mp_to_wp( static::$input );
 		$args = static::store_micropub_auth_response( $args );
 
-		$post_content = self::get( $args, 'post_content', '' );
+		$post_content = mp_get( $args, 'post_content', '' );
 		$post_content = apply_filters( 'micropub_post_content', $post_content, static::$input );
 		if ( $post_content ) {
 			$args['post_content'] = $post_content;
@@ -272,16 +366,19 @@ class Micropub_Endpoint {
 
 		$args = static::store_mf2( $args );
 		$args = static::store_geodata( $args );
+		if ( is_micropub_error( $args ) ) {
+			return $args;
+		}
 
 		if ( $user_id ) {
 			$args['post_author'] = $user_id;
 		}
 		$args['post_status'] = static::post_status( static::$input );
 		if ( ! $args['post_status'] ) {
-			static::error( 400, 'Invalid Post Status' );
+			return new WP_Micropub_Error( 'invalid_request', 'Invalid Post Status', 400 );
 		}
 		if ( WP_DEBUG ) {
-			error_log( 'wp_insert_post with args: ' . wp_json_encode( $args ) );
+			static::log_error( $args, 'wp_insert_post with args' );
 		}
 
 		kses_remove_filters();  // prevent sanitizing HTML tags in post_content
@@ -298,21 +395,21 @@ class Micropub_Endpoint {
 	 * This really needs a db transaction! But we can't assume the underlying
 	 * MySQL db is InnoDB and supports transactions. :(
 	 */
-	private static function update() {
-		$post_id = url_to_postid( static::$input['url'] );
+	private static function update( $input ) {
+		$post_id = url_to_postid( $input['url'] );
 		$args    = get_post( $post_id, ARRAY_A );
 		if ( ! $args ) {
-			static::error( 400, static::$input['url'] . ' not found' );
+			return new WP_Micropub_Error( 'invalid_request', sprintf( '%1$s not found', $input['url'] ), 400 );
 		}
 
 		// add
-		$add = static::$input['add'];
+		$add = mp_get( $input, 'add', false );
 		if ( $add ) {
 			if ( ! is_array( $add ) ) {
-				static::error( 400, 'add must be an object' );
+				return new WP_Micropub_Error( 'invalid_request', 'add must be an object', 400 );
 			}
 			if ( array_diff( array_keys( $add ), array( 'category', 'syndication' ) ) ) {
-				static::error( 400, 'can only add to category and syndication; other properties not supported' );
+				return new WP_Micropub_Error( 'invalid_request', 'can only add to category and syndication; other properties not supported', 400 );
 			}
 			$add_args = static::mp_to_wp( array( 'properties' => $add ) );
 			if ( $add_args['tags_input'] ) {
@@ -332,10 +429,10 @@ class Micropub_Endpoint {
 		}
 
 		// replace
-		$replace = static::$input['replace'];
+		$replace = mp_get( $input, 'replace', false );
 		if ( $replace ) {
 			if ( ! is_array( $replace ) ) {
-				static::error( 400, 'replace must be an object' );
+				return new WP_Micropub_Error( 'invalid_request', 'replace must be an object', 400 );
 			}
 			foreach ( static::mp_to_wp( array( 'properties' => $replace ) )
 					as $name => $val ) {
@@ -344,11 +441,11 @@ class Micropub_Endpoint {
 		}
 
 		// delete
-		$delete = static::$input['delete'];
+		$delete = mp_get( $input, 'delete', false );
 		if ( $delete ) {
 			if ( is_assoc_array( $delete ) ) {
 				if ( array_diff( array_keys( $delete ), array( 'category', 'syndication' ) ) ) {
-					static::error( 400, 'can only delete individual values from category and syndication; other properties not supported' );
+					return new WP_Micropub_Error( 'invalid_request', 'can only delete individual values from category and syndication; other properties not supported', 400 );
 				}
 				$delete_args = static::mp_to_wp( array( 'properties' => $delete ) );
 				if ( $delete_args['tags_input'] ) {
@@ -373,7 +470,7 @@ class Micropub_Endpoint {
 					wp_set_post_categories( $post_id, '' );
 				}
 			} else {
-				static::error( 400, 'delete must be an array or object' );
+				return new WP_Micropub_Error( 'invalid_request', 'delete must be an array or object', 400 );
 			}
 		}
 
@@ -382,7 +479,7 @@ class Micropub_Endpoint {
 		$args['edit_date'] = true;
 
 		// Generate Post Content
-		$post_content = self::get( $args, 'post_content', '' );
+		$post_content = mp_get( $args, 'post_content', '' );
 		$post_content = apply_filters( 'micropub_post_content', $post_content, static::$input );
 		if ( $post_content ) {
 			$args['post_content'] = $post_content;
@@ -393,7 +490,7 @@ class Micropub_Endpoint {
 		$args = static::store_geodata( $args );
 
 		if ( WP_DEBUG ) {
-			error_log( 'wp_update_post with args: ' . wp_json_encode( $args ) );
+			static::log_error( $args, 'wp_update_post with args' );
 		}
 
 		kses_remove_filters();
@@ -402,18 +499,6 @@ class Micropub_Endpoint {
 
 		static::default_file_handler( $post_id );
 		return $args;
-	}
-
-	private static function handle_authorize_error( $code, $msg ) {
-		$home = untrailingslashit( home_url() );
-		if ( 'http://localhost' === $home ) {
-			error_log(
-				'WARNING: ' . $code . ' ' . $msg .
-				". Allowing only because this is localhost.\n"
-			);
-			return;
-		}
-		static::respond( $code, $msg );
 	}
 
 	private static function default_post_status() {
@@ -550,56 +635,28 @@ class Micropub_Endpoint {
 			$props   = static::$input['properties'];
 			$att_ids = array();
 
-			if ( isset( $_FILES[ $field ] ) || isset( $props[ $field ] ) ) {
-				require_once ABSPATH . 'wp-admin/includes/image.php';
-				require_once ABSPATH . 'wp-admin/includes/file.php';
-				require_once ABSPATH . 'wp-admin/includes/media.php';
-
-				if ( isset( $_FILES[ $field ] ) ) {
-					$overrides = array(
-						'action'    => 'allow_file_outside_uploads_dir',
-						'test_form' => false,
-					);
-
-					$files = $_FILES[ $field ];
+			if ( isset( static::$files[ $field ] ) || isset( $props[ $field ] ) ) {
+				if ( isset( static::$files[ $field ] ) ) {
+					$files = static::$files[ $field ];
 					if ( is_array( $files['name'] ) ) {
-						$count = count( $files['name'] );
-						for ( $i = 0; $i < $count; ++$i ) {
-							$_FILES = array(
-								$field => array(
-									'name'     => $files['name'][ $i ],
-									'tmp_name' => $files['tmp_name'][ $i ],
-									// 'type' => $files['type'][ $i ],
-									// 'error' => $files['error'][ $i ],
-									'size'     => $files['size'][ $i ],
-								),
-							);
+						$files = Micropub_Media::file_array( $files );
+						foreach ( $files as $file ) {
 							$att_ids[] = static::check_error(
-								media_handle_upload(
-									$field, $post_id, array(), $overrides
-								)
+								Micropub_Media::media_handle_upload( $file, $post_id )
 							);
 						}
 					} else {
 						$att_ids[] = static::check_error(
-							media_handle_upload(
-								$field, $post_id, array(), $overrides
-							)
+							Micropub_Media::media_handle_upload( $files, $post_id )
 						);
 					}
 				} elseif ( isset( $props[ $field ] ) ) {
 					foreach ( $props[ $field ] as $val ) {
 						$url       = is_array( $val ) ? $val['value'] : $val;
-						$filename  = static::check_error( static::download_url( $url ) );
-						$file      = array(
-							'name'     => basename( $url ),
-							'tmp_name' => $filename,
-							'size'     => filesize( $filename ),
-						);
-						$desc      = is_array( $val ) ? $val['alt'] : $file['name'];
+						$desc      = is_array( $val ) ? $val['alt'] : null;
 						$att_ids[] = static::check_error(
-							media_handle_sideload(
-								$file, $post_id, $desc
+							Micropub_Media::media_sideload_url(
+								$url, $post_id, $desc
 							)
 						);
 					}
@@ -607,6 +664,9 @@ class Micropub_Endpoint {
 
 				$att_urls = array();
 				foreach ( $att_ids as $id ) {
+					if ( is_micropub_error( $id ) ) {
+						return $id;
+					}
 					$att_urls[] = wp_get_attachment_url( $id );
 				}
 				add_post_meta( $post_id, 'mf2_' . $field, $att_urls, true );
@@ -655,7 +715,7 @@ class Micropub_Endpoint {
 					$args['meta_input']['geo_public'] = 2;
 					break;
 				default:
-					static::error( 400, 'unsupported location visibility ' . $visibility );
+					return new WP_Micropub_Error( 'invalid_request', sprintf( 'unsupported location visibility %1$s', $visiblity ), 400 );
 
 			}
 		}
@@ -719,7 +779,7 @@ class Micropub_Endpoint {
 	public static function store_micropub_auth_response( $args ) {
 		$micropub_auth_response = static::$micropub_auth_response;
 		if ( $micropub_auth_response || ( is_assoc_array( $micropub_auth_response ) ) ) {
-			$args['meta_input']                           = self::get( $args, 'meta_input' );
+			$args['meta_input']                           = mp_get( $args, 'meta_input' );
 			$args['meta_input']['micropub_auth_response'] = $micropub_auth_response;
 		}
 		return $args;
@@ -735,9 +795,9 @@ class Micropub_Endpoint {
 	 * request is an update, it changes the post meta values in the db directly.
 	 */
 	public static function store_mf2( $args ) {
-		$props = static::$input['properties'];
+		$props = mp_get( static::$input, 'properties', false );
 		if ( ! isset( $args['ID'] ) && $props ) {
-			$args['meta_input'] = self::get( $args, 'meta_input' );
+			$args['meta_input'] = mp_get( $args, 'meta_input' );
 			$type               = static::$input['type'];
 			if ( $type ) {
 				$args['meta_input']['mf2_type'] = $type;
@@ -810,38 +870,32 @@ class Micropub_Endpoint {
 		return $mf2;
 	}
 
-	public static function error( $code, $message ) {
-		static::respond(
-			$code, array(
-				'error'             => ( 403 === $code ) ? 'forbidden' :
-							( 401 === $code ) ? 'insufficient_scope' :
-							'invalid_request',
-				'error_description' => $message,
-			)
-		);
-	}
-
 	private static function check_error( $result ) {
 		if ( ! $result ) {
-			static::error( 400, $result );
+			return new WP_Micropub_Error( 'invalid_request', $result, 400 );
 		} elseif ( is_wp_error( $result ) ) {
-			static::error( 400, $result->get_error_message() );
+			return micropub_wp_error( $result );
 		}
 		return $result;
+	}
+
+	public static function get_micropub_endpoint() {
+		return rest_url( MICROPUB_NAMESPACE . '/endpoint' );
 	}
 
 	/**
 	 * The micropub autodicovery meta tags
 	 */
 	public static function micropub_html_header() {
-		printf( '<link rel="micropub" href="%s" />' . PHP_EOL, site_url( '?micropub=endpoint' ) );
+		// phpcs:ignore
+		printf( '<link rel="micropub" href="%s" />' . PHP_EOL, static::get_micropub_endpoint() );
 	}
 
 	/**
 	 * The micropub autodicovery http-header
 	 */
 	public static function micropub_http_header() {
-		static::header( 'Link', '<' . site_url( '?micropub=endpoint' ) . '>; rel="micropub"' );
+		static::header( 'Link', '<' . static::get_micropub_endpoint() . '>; rel="micropub"' );
 	}
 
 	/**
@@ -850,13 +904,13 @@ class Micropub_Endpoint {
 	public static function micropub_jrd_links( $array ) {
 		$array['links'][] = array(
 			'rel'  => 'micropub',
-			'href' => site_url( '?micropub=endpoint' ),
+			'href' => static::get_micropub_endpoint(),
 		);
 		return $array;
 	}
 
 	/* Takes form encoded input and converts to json encoded input */
-	protected static function form_to_json( $data ) {
+	public static function form_to_json( $data ) {
 		$input = array();
 		foreach ( $data as $key => $val ) {
 			if ( 'action' === $key || 'url' === $key ) {
@@ -866,45 +920,13 @@ class Micropub_Endpoint {
 			} elseif ( 'access_token' === $key ) {
 				continue;
 			} else {
-				$input['properties']         = self::get( $input, 'properties' );
+				$input['properties']         = mp_get( $input, 'properties' );
 				$input['properties'][ $key ] =
 				( is_array( $val ) && wp_is_numeric_array( $val ) )
 				? $val : array( $val );
 			}
 		}
 		return $input;
-	}
-
-	protected static function load_input() {
-		$content_type = explode( ';', static::get_header( 'Content-Type' ) );
-		$content_type = $content_type[0];
-		if ( 'GET' === $_SERVER['REQUEST_METHOD'] ) {
-			static::$input = $_GET;
-		} elseif ( 'application/json' === $content_type ) {
-			static::$input = json_decode( static::read_input(), true );
-		} elseif ( ! $content_type ||
-			   'application/x-www-form-urlencoded' === $content_type ||
-			   'multipart/form-data' === $content_type ) {
-			static::$input = static::form_to_json( $_POST );
-		} else {
-			static::error( 400, 'unsupported content type ' . $content_type );
-		}
-	}
-
-	/** Wrappers for WordPress/PHP functions so we can mock them for unit tests.
-	 **/
-	protected static function read_input() {
-		return file_get_contents( 'php://input' );
-	}
-
-	protected static function respond( $code, $resp = null, $args = null ) {
-		status_header( $code );
-		static::header( 'Content-Type', 'application/json' );
-		exit( $resp ? wp_json_encode( $resp ) : '{}' );
-	}
-
-	public static function header( $header, $value ) {
-		header( $header . ': ' . $value, false );
 	}
 
 	protected static function get_header( $name ) {
@@ -918,30 +940,8 @@ class Micropub_Endpoint {
 		return static::$request_headers[ strtolower( $name ) ];
 	}
 
-	protected static function download_url( $url ) {
-		return static::check_error( download_url( $url ) );
+	public static function header( $header, $value ) {
+		header( $header . ': ' . $value, false );
 	}
 }
 
-
-function is_assoc_array( $array ) {
-	return is_array( $array ) && array_values( $array ) !== $array;
-}
-
-
-	// blatantly stolen from https://github.com/idno/Known/blob/master/Idno/Pages/File/View.php#L25
-if ( ! function_exists( 'getallheaders' ) ) {
-	function getallheaders() {
-		$headers = array();
-		foreach ( $_SERVER as $name => $value ) {
-			if ( 'HTTP_' === substr( $name, 0, 5 ) ) {
-				$headers[ str_replace( ' ', '-', strtolower( str_replace( '_', ' ', substr( $name, 5 ) ) ) ) ] = $value;
-			} elseif ( 'CONTENT_TYPE' === $name ) {
-				$headers['content-type'] = $value;
-			} elseif ( 'CONTENT_LENGTH' === $name ) {
-				$headers['content-length'] = $value;
-			}
-		}
-		return $headers;
-	}
-}
