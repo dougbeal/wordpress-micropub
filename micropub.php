@@ -28,12 +28,16 @@
  * 5. Extract the access_token parameter from the response body.
  */
 
-if ( ! defined( 'MICROPUB_LOCAL_AUTH' ) ) {
-	define( 'MICROPUB_LOCAL_AUTH', '0' );
-}
-
 if ( ! defined( 'MICROPUB_NAMESPACE' ) ) {
 	define( 'MICROPUB_NAMESPACE', 'micropub/1.0' );
+}
+
+if ( ! defined( 'MICROPUB_DISABLE_NAG' ) ) {
+	define( 'MICROPUB_DISABLE_NAG', 0 );
+}
+
+if ( ! defined( 'MICROPUB_LOCAL_AUTH' ) ) {
+	define( 'MICROPUB_LOCAL_AUTH', 0 );
 }
 
 // Global Functions
@@ -42,9 +46,20 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/functions.php';
 // Admin Menu Functions
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-admin.php';
 
-if ( MICROPUB_LOCAL_AUTH || ! class_exists( 'IndieAuth_Plugin' ) ) {
-	require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-authorize.php';
+function load_micropub_auth() {
+	// Always disable local auth when the IndieAuth Plugin is installed
+	if ( class_exists( 'IndieAuth_Plugin' ) ) {
+		return;
+	}
+	// If this configuration option is set to 0 then load this file
+	if ( 0 === MICROPUB_LOCAL_AUTH ) {
+		require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-authorize.php';
+	
+	}
 }
+
+// Load auth at the plugins loaded stage in order to ensure it occurs after the IndieAuth plugin is loaded
+add_action( 'plugins_loaded', 'load_micropub_auth', 20 );
 
 // Error Handling Class
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-error.php';
@@ -57,4 +72,16 @@ require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-endpoint.php
 
 // Render Functions
 require_once plugin_dir_path( __FILE__ ) . 'includes/class-micropub-render.php';
+
+function micropub_not_ssl_notice() {
+	if ( is_ssl() || MICROPUB_DISABLE_NAG ) {
+		return;
+	}
+	?>
+	<div class="notice notice-warning">
+		<p>For security reasons you should use Micropub only on an HTTPS domain.</p>
+	</div>
+	<?php
+}
+add_action( 'admin_notices', 'micropub_not_ssl_notice' );
 

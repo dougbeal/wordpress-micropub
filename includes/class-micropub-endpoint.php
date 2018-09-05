@@ -16,10 +16,10 @@ class Micropub_Endpoint {
 	protected static $files;
 
 	// associative array, populated by authorize().
-	protected static $micropub_auth_response;
+	protected static $micropub_auth_response = array();
 
 	// Array of Scopes
-	protected static $scopes;
+	protected static $scopes = array();
 
 	/**
 	 * Initialize the plugin.
@@ -90,22 +90,37 @@ class Micropub_Endpoint {
 	public static function load_auth() {
 		static::$micropub_auth_response = apply_filters( 'indieauth_response', static::$micropub_auth_response );
 		static::$scopes                 = apply_filters( 'indieauth_scopes', static::$scopes );
-	}
-
-	public static function check_query_permissions( $request ) {
-		self::load_auth();
-		$query = $request->get_param( 'q' );
-		if ( ! $query ) {
-			return new WP_Error( 'invalid_request', 'Missing Query Parameter', array( 'status' => 400 ) );
-		}
+		// Every user should have this capability which reflects the ability to access your user profile and the admin dashboard
 		if ( ! current_user_can( 'read' ) ) {
 			return new WP_Error( 'forbidden', 'Unauthorized', array( 'status' => 403 ) );
+		}
+
+		// If there is no auth response this is cookie authentication which should be rejected
+		// https://www.w3.org/TR/micropub/#authentication-and-authorization - Requests must be authenticated by token
+		if ( empty( static::$micropub_auth_response ) ) {
+			return new WP_Error( 'unauthorized', 'Cookie Authentication is not permitted', array( 'status' => 401 ) );
 		}
 		return true;
 	}
 
+	public static function check_query_permissions( $request ) {
+		$auth = self::load_auth();
+		if ( is_wp_error( $auth ) ) {
+			return $auth;
+		}
+		$query = $request->get_param( 'q' );
+		if ( ! $query ) {
+			return new WP_Error( 'invalid_request', 'Missing Query Parameter', array( 'status' => 400 ) );
+		}
+
+		return true;
+	}
+
 	public static function check_post_permissions( $request ) {
-		self::load_auth();
+		$auth = self::load_auth();
+		if ( is_wp_error( $auth ) ) {
+			return $auth;
+		}
 
 		$action = $request->get_param( 'action' );
 		$action = $action ? $action : 'create';
@@ -205,14 +220,12 @@ class Micropub_Endpoint {
 			return $load;
 		}
 
-
 		$action = mp_get( static::$input, 'action', 'create' );
 		if ( ! self::check_scope( $action ) ) {
 			return new WP_Micropub_Error( 'insufficient_scope', sprintf( 'scope insufficient to %1$s posts', $action ), 403 );
 		}
 
 		$url = mp_get( static::$input, 'url' );
-
 
 		// check that we support all requested syndication targets
 		$synd_supported = self::get_syndicate_targets( $user_id );
@@ -329,18 +342,8 @@ class Micropub_Endpoint {
 					if ( ! $post_id ) {
 						return new WP_Micropub_Error( 'invalid_request', sprintf( 'not found: %1$s', static::$input['url'] ), 400 );
 					}
-					$resp  = static::get_mf2( $post_id );
-					$props = static::$input['properties'];
-					if ( $props ) {
-						if ( ! is_array( $props ) ) {
-							$props = array( $props );
-						}
-						$resp = array(
-							'properties' => array_intersect_key(
-								$resp['properties'], array_flip( $props )
-							),
-						);
-					}
+					$resp = self::query( $post_id );
+
 					break;
 				default:
 					return new WP_Micropub_Error( 'invalid_request', 'unknown query', 400, static::$input );
@@ -350,6 +353,29 @@ class Micropub_Endpoint {
 		do_action( 'after_micropub', static::$input, null );
 		return new WP_REST_Response( $resp, 200 );
 	}
+
+	/* Query a format.
+	 *
+	 * @param int $post_id Post ID
+	 *
+	 * @return array MF2 Formatted Array
+	 */
+	public static function query( $post_id ) {
+		$resp  = static::get_mf2( $post_id );
+		$props = static::$input['properties'];
+		if ( $props ) {
+			if ( ! is_array( $props ) ) {
+				$props = array( $props );
+			}
+			$resp = array(
+				'properties' => array_intersect_key(
+					$resp['properties'], array_flip( $props )
+				),
+			);
+		}
+		return $resp;
+	}
+
 
 	/*
 	 * Handle a create request.
@@ -427,19 +453,7 @@ class Micropub_Endpoint {
 				);
 			}
 		}
-
-		// replace
-		$replace = mp_get( $input, 'replace', false );
-		if ( $replace ) {
-			if ( ! is_array( $replace ) ) {
-				return new WP_Micropub_Error( 'invalid_request', 'replace must be an object', 400 );
-			}
-			foreach ( static::mp_to_wp( array( 'properties' => $replace ) )
-					as $name => $val ) {
-				$args[ $name ] = $val;
-			}
-		}
-
+		// Delete was moved to before replace in versions greater than 1.4.3 due to the fact that all items should be removed before replacement
 		// delete
 		$delete = mp_get( $input, 'delete', false );
 		if ( $delete ) {
@@ -474,11 +488,26 @@ class Micropub_Endpoint {
 			}
 		}
 
+		// replace
+		$replace = mp_get( $input, 'replace', false );
+		if ( $replace ) {
+			if ( ! is_array( $replace ) ) {
+				return new WP_Micropub_Error( 'invalid_request', 'replace must be an object', 400 );
+			}
+			foreach ( static::mp_to_wp( array( 'properties' => $replace ) )
+				as $name => $val ) {
+				$args[ $name ] = $val;
+			}
+		}
+
 		// tell WordPress to preserve published date explicitly, otherwise
 		// wp_update_post sets it to the current time
 		$args['edit_date'] = true;
 
-		// Generate Post Content
+		/* Filter Post Content
+		 * Post Content is initially generated from content properties in the mp_to_wp function however this function is called
+		 * multiple times for replace and delete
+		*/
 		$post_content = mp_get( $args, 'post_content', '' );
 		$post_content = apply_filters( 'micropub_post_content', $post_content, static::$input );
 		if ( $post_content ) {
@@ -612,17 +641,15 @@ class Micropub_Endpoint {
 				}
 			}
 		}
-
-		$content = $props['content'][0];
-		if ( is_array( $content ) ) {
-			$args['post_content'] = $content['html'] ?:
-								htmlspecialchars( $content['value'] );
-		} elseif ( $content ) {
-			$args['post_content'] = htmlspecialchars( $content );
-		} elseif ( $props['summary'] ) {
-			$args['post_content'] = $props['summary'][0];
+		if ( isset( $props['content'] ) ) {
+			$content = $props['content'][0];
+			if ( is_array( $content ) ) {
+				$args['post_content'] = $content['html'] ?:
+							htmlspecialchars( $content['value'] );
+			} elseif ( $content ) {
+				$args['post_content'] = htmlspecialchars( $content );
+			}
 		}
-
 		return $args;
 	}
 

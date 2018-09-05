@@ -3,11 +3,11 @@ A [Micropub](http://micropub.net/) server plugin. Available in the WordPress plu
 
 ## Description 
 
-[![Travis CI](https://travis-ci.org/snarfed/wordpress-micropub.svg?branch=master)](https://travis-ci.org/snarfed/wordpress-micropub)
+[![Travis CI](https://travis-ci.org/indieweb/wordpress-micropub.svg?branch=master)](https://travis-ci.org/indieweb/wordpress-micropub)
 
 > Micropub is an open API standard that is used to create posts on one's own domain using third-party clients. Web apps and native apps (e.g. iPhone, Android) can use Micropub to post short notes, photos, events or other posts to your own site, similar to a Twitter client posting to Twitter.com.
 
-Once you've installed and activated the plugin, try using [Quill](http://quill.p3k.io/) to create a new post on your site. It walks you through the steps and helps you troubleshoot if you run into any problems. After that, try other clients like [OwnYourGram](http://ownyourgram.com/), [OwnYourCheckin](https://ownyourcheckin.wirres.net/), [MobilePub](http://indiewebcamp.com/MobilePub), and [Teacup](https://teacup.p3k.io/).
+Once you've installed and activated the plugin, try using [Quill](http://quill.p3k.io/) to create a new post on your site. It walks you through the steps and helps you troubleshoot if you run into any problems. A list of known Micropub clients are available [here](https://indieweb.org/Micropub/Clients)
 
 Supports the [full W3C Micropub CR spec](https://www.w3.org/TR/micropub/) as of version 2.0.0.
 
@@ -32,7 +32,7 @@ Supports the following [scope](https://indieweb.org/scope) parameters requested 
 
 
 ### Filters and hooks 
-Adds four filters:
+Adds six filters:
 
 `before_micropub( $input )`
 
@@ -44,11 +44,18 @@ Called during the handling of a Micropub request. The content generation functio
 
 `micropub_syndicate-to( $synd_urls, $user_id )`
 
-Called to generate the list of `syndicate-to` targets to return in response to a query. Returns `$synd_urls`, an array, possibly modified.
-
+Called to generate the list of `syndicate-to` targets to return in response to a query. Returns `$synd_urls`, an array, possibly modified. This filter is empty by default
 `micropub_query( $resp, $input )`
 
 $resp defaults to null. If the return value is non-null, it should be an associative array that is encoded as JSON and will be returned in place of the normal micropub response.
+
+`indieauth_scopes( $scopes )`
+
+This returns scopes from a plugin implementing IndieAuth or from the internal IndieAuth code. This filter is empty by default.
+
+`indieauth_response( $response )`
+
+This returns the token auth response from a plugin implementing IndieAuth or from the internal IndieAuth code. This filter is empty by default.
 
 ...and two hooks:
 
@@ -57,6 +64,7 @@ $resp defaults to null. If the return value is non-null, it should be an associa
 Called after handling a Micropub request. Not called if the request fails (ie doesn't return HTTP 2xx).
 
 `micropub_syndication( $ID, $syndicate_to )`
+
 
 Called only if there are syndication targets $syndicate_to for post $ID. $syndicate_to will be an array of UIDs that are verified as one or more of the UIDs added using the `micropub_syndicate-to` filter.
 
@@ -94,15 +102,17 @@ WordPress has a [whitelist of file extensions that it allows in uploads](https:/
 
 ## Authentication and authorization 
 
-Supports the full OAuth2/IndieAuth authentication and authorization flow. Defaults to IndieAuth. Custom auth and token endpoints can be used by overriding the `MICROPUB_AUTHENTICATION_ENDPOINT` and `MICROPUB_TOKEN_ENDPOINT` endpoints or by setting the options `indieauth_authorization_endpoint` and `indieauth_token_endpoint`.
+For reasons of security it is recommended that you only use this plugin on sites that implement HTTPS.
+
+Supports the full OAuth2/IndieAuth authentication and authorization flow. Defaults to IndieAuth.com. Custom auth and token endpoints can be used by overriding the `MICROPUB_AUTHENTICATION_ENDPOINT`
+and `MICROPUB_TOKEN_ENDPOINT` endpoints or by setting the options `indieauth_authorization_endpoint` and `indieauth_token_endpoint`.
+
+If you want to use your own site as an IndieAuth endpoint, you can activate the IndieAuth plugin which is recommended but not required. You can disable the authentication in favor of an alternative plugin.
+This can be done by removing the loading of the auth flow or setting MICROPUB_LOCAL_AUTH to 1.
+
+`remove_action( 'plugins_loaded', 'load_micropub_auth', 20 );` 
 
 If the token's `me` value matches a WordPress user's or author post URL, that user will be used. If there is only one site author that will be matched otherwise.
-
-Alternatively, you can set `MICROPUB_LOCAL_AUTH` to 1 to disable the plugin's authorization function, for example if you want authorization to be done by WordPress or another plugin. It will also 
-be disabled if the IndieAuth plugin is installed.
-
-Finally, for ease of development, if the WordPress site is running on `localhost`, it logs a warning if the access token is missing or invalid and still allows the request.
-
 
 
 ## Installation 
@@ -115,12 +125,13 @@ Install from the WordPress plugin directory. No setup needed.
 
 These configuration options can be enabled by adding them to your wp-config.php
 
-* `define('MICROPUB_LOCAL_AUTH', '1')` - Disable this plugins built-in authentication.
 * `define('MICROPUB_AUTHENTICATION_ENDPOINT', 'https://indieauth.com/auth')` - Define a custom authentication endpoint.
 * `define('MICROPUB_TOKEN_ENDPOINT', 'https://tokens.indieauth.com/token')` - Define a custom token endpoint
 * `define('MICROPUB_NAMESPACE', 'micropub/1.0' )` - By default the namespace for micropub is micropub/1.0. This would allow you to change this for your endpoint
+* `define('MICROPUB_DISABLE_NAG', 1 ) - Disable notices for insecure sites
+* `define('MICROPUB_LOCAL_AUTH', 1 ) - Disable built in AUTH in favor of your own plugin. Recommend plugin developers use the filter `disable_micropub_auth` for this.
 
-These configuration options can be enabled by setting them in the WordPress options table or will appear under General if you install the IndieAuth plugin.
+These configuration options can be enabled by setting them in the WordPress options table.
 * `indieauth_authorization_endpoint` - if set will override MICROPUB_AUTHENTICATION_ENDPOINT for setting a custom endpoint
 * `indieauth_token_endpoint` - if set will override MICROPUB_TOKEN_ENDPOINT for setting a custom endpoint
 * `micropub_default_post_status` - if set, Micropub posts will be set to this status by default( publish, draft, or private ). Can also be set on the settings page.
@@ -128,7 +139,7 @@ These configuration options can be enabled by setting them in the WordPress opti
 
 ## Frequently Asked Questions 
 
-If your Micropub client includes an `Authorization` HTTP request header but you still get an HTTP 401 response with body `missing access token`, your server may be stripping the `Authorization` header. If you're on Apache, [try adding this line to your `.htaccess` file](https://github.com/snarfed/wordpress-micropub/issues/56#issuecomment-299202820):
+If your Micropub client includes an `Authorization` HTTP request header but you still get an HTTP 401 response with body `missing access token`, your server may be stripping the `Authorization` header. If you're on Apache, [try adding this line to your `.htaccess` file](https://github.com/indieweb/wordpress-micropub/issues/56#issuecomment-299202820):
 
     SetEnvIf Authorization "(.*)" HTTP_AUTHORIZATION=$1
 
@@ -136,7 +147,7 @@ If that doesn't work, [try this line](https://github.com/georgestephanis/applica
 
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-If that doesn't work either, you may need to ask your hosting provider to whitelist the `Authorization` header for your account. If they refuse, you can [pass it through Apache with an alternate name](https://github.com/snarfed/wordpress-micropub/issues/56#issuecomment-299569822). The plugin searches for the header in REDIRECT_HTTP_AUTHORIZATION, as some FastCGI implementations store the header in this location.
+If that doesn't work either, you may need to ask your hosting provider to whitelist the `Authorization` header for your account. If they refuse, you can [pass it through Apache with an alternate name](https://github.com/indieweb/wordpress-micropub/issues/56#issuecomment-299569822). The plugin searches for the header in REDIRECT_HTTP_AUTHORIZATION, as some FastCGI implementations store the header in this location.
 
 If you are getting an `Unauthorized` error despite passing a valid access token then your WordPress installation may not be able to match your user account with the provided URL. The easiest way to 
 resolve is to add the URL you are using as the URL in your user profile. 
@@ -144,7 +155,10 @@ resolve is to add the URL you are using as the URL in your user profile.
 
 ## Upgrade Notice 
 
-None yet.
+
+### Version 2.0.0 
+
+This version changes the Micropub endpoint URL as it now uses the REST API. You may have to update any third-parties that have cached this info.
 
 
 ## Screenshots 
@@ -154,7 +168,7 @@ None.
 
 ## Development 
 
-The canonical repo is http://github.com/snarfed/wordpress-micropub . Feedback and pull requests are welcome!
+The canonical repo is http://github.com/indieweb/wordpress-micropub . Feedback and pull requests are welcome!
 
 To add a new release to the WordPress plugin directory, run `push.sh`.
 
@@ -201,6 +215,8 @@ into markdown and saved to readme.md.
 * Improve error handling
 * Ensure compliance with Micropub spec
 * Update composer dependencies and include PHPUnit as a development dependency
+* Add nag notice for http domains and the option to diable with a setting
+* Load auth later in init sequence to avoid conflict
 
 
 ### 1.4.3 (2018-05-27) 
