@@ -162,7 +162,9 @@ class Micropub_Endpoint {
 			return new WP_Micropub_Error( 'invalid_request', 'No input provided', 400 );
 		}
 		if ( WP_DEBUG ) {
-			static::log_error( $request->get_query_params(), 'Micropub Query Parameters' );
+			if ( ! empty( static::$files ) ) {
+				static::log_error( array_keys( static::$files ), 'Micropub File Parameters' );
+			}
 			static::log_error( static::$input, 'Micropub Input' );
 		}
 		static::$input = apply_filters( 'before_micropub', static::$input );
@@ -294,10 +296,12 @@ class Micropub_Endpoint {
 		if ( is_micropub_error( $args ) ) {
 			return $args;
 		}
+		do_action( 'after_micropub', static::$input, $args );
+
 		if ( ! empty( $synd_requested ) ) {
 			do_action( 'micropub_syndication', $args['ID'], $synd_requested );
 		}
-		do_action( 'after_micropub', static::$input, $args );
+
 		$response->set_data( $args );
 		return $response;
 	}
@@ -315,43 +319,85 @@ class Micropub_Endpoint {
 		$user_id = get_current_user_id();
 		static::load_input( $request );
 
-		$resp = apply_filters( 'micropub_query', null, static::$input );
-		if ( ! $resp ) {
-			switch ( static::$input['q'] ) {
-				case 'config':
-					$resp = array(
-						'syndicate-to'   => static::get_syndicate_targets( $user_id ),
-						'media-endpoint' => rest_url( MICROPUB_NAMESPACE . '/media' ),
-					);
-					break;
-				case 'syndicate-to':
-					// return syndication targets with filter
-					$resp = array( 'syndicate-to' => static::get_syndicate_targets( $user_id ) );
-					break;
-				case 'category':
-					$resp = array_merge(
-						get_tags( array( 'fields' => 'names' ) ),
-						get_terms(
-							array(
-								'taxonomy' => 'category',
-								'fields'   => 'names',
-							)
+		switch ( static::$input['q'] ) {
+			case 'config':
+				$resp = array(
+					'syndicate-to'   => static::get_syndicate_targets( $user_id ),
+					'media-endpoint' => rest_url( MICROPUB_NAMESPACE . '/media' ),
+					'mp'             => array(
+						'slug',
+						'syndicate-to',
+					), // List of supported mp parameters
+					'q'              => array(
+						'config',
+						'syndicate-to',
+						'category',
+						'source',
+					), // List of supported query parameters https://github.com/indieweb/micropub-extensions/issues/7
+					'properties'     => array(
+						'location-visibility',
+					), // List of support properties https://github.com/indieweb/micropub-extensions/issues/8
+				);
+				break;
+			case 'syndicate-to':
+				// return syndication targets with filter
+				$resp = array( 'syndicate-to' => static::get_syndicate_targets( $user_id ) );
+				break;
+			case 'category':
+				// https://github.com/indieweb/micropub-extensions/issues/5
+				$resp = array_merge(
+					get_tags( array( 'fields' => 'names' ) ),
+					get_terms(
+						array(
+							'taxonomy' => 'category',
+							'fields'   => 'names',
+						)
+					)
+				);
+				if ( array_key_exists( 'search', static::$input ) ) {
+					$search = static::$input['search'];
+					$resp   = array_values(
+						array_filter(
+							$resp,
+							function( $value ) use ( $search ) {
+								return ( false !== stripos( $value, $search ) );
+							}
 						)
 					);
-					break;
-				case 'source':
+				}
+
+				$resp = array( 'categories' => $resp );
+				break;
+			case 'source':
+				if ( array_key_exists( 'url', static::$input ) ) {
 					$post_id = url_to_postid( static::$input['url'] );
 					if ( ! $post_id ) {
 						return new WP_Micropub_Error( 'invalid_request', sprintf( 'not found: %1$s', static::$input['url'] ), 400 );
 					}
 					$resp = self::query( $post_id );
+				} else {
+					$numberposts = mp_get( static::$input, 'limit', 10 );
+					$posts       = get_posts(
+						array(
+							'posts_per_page' => $numberposts,
+							'fields'         => 'ids',
+						)
+					);
+					$resp        = array();
+					foreach ( $posts as $post ) {
+						$resp[] = self::query( $post );
+					}
+					$resp = array( 'items' => $resp );
+				}
 
-					break;
-				default:
-					return new WP_Micropub_Error( 'invalid_request', 'unknown query', 400, static::$input );
-			}
+				break;
+			default:
+				$resp = new WP_Micropub_Error( 'invalid_request', 'unknown query', 400, static::$input );
 		}
-
+		$resp = apply_filters( 'micropub_query', $resp, static::$input );
+		if ( is_wp_error( $resp ) ) {
+			return $resp;
+		}
 		do_action( 'after_micropub', static::$input, null );
 		return new WP_REST_Response( $resp, 200 );
 	}
@@ -364,7 +410,7 @@ class Micropub_Endpoint {
 	 */
 	public static function query( $post_id ) {
 		$resp  = static::get_mf2( $post_id );
-		$props = static::$input['properties'];
+		$props = mp_get( static::$input, 'properties' );
 		if ( $props ) {
 			if ( ! is_array( $props ) ) {
 				$props = array( $props );
@@ -701,6 +747,12 @@ class Micropub_Endpoint {
 					}
 					$att_urls[] = wp_get_attachment_url( $id );
 				}
+				// Add to the input so will be visible to the after_micropub action
+				if ( ! isset( static::$input['properties'][ $field ] ) ) {
+					static::$input['properties'][ $field ] = $att_urls;
+				} else {
+					static::$input['properties'][ $field ] = array_merge( static::$input['properties'][ $field ], $att_urls );
+				}
 				add_post_meta( $post_id, 'mf2_' . $field, $att_urls, true );
 			}
 		}
@@ -894,7 +946,7 @@ class Micropub_Endpoint {
 		$mf2 = array();
 
 		foreach ( get_post_meta( $post_id ) as $field => $val ) {
-			$val = unserialize( $val[0] );
+			$val = maybe_unserialize( $val[0] );
 			if ( 'mf2_type' === $field ) {
 				$mf2['type'] = $val;
 			} elseif ( 'mf2_' === substr( $field, 0, 4 ) ) {
